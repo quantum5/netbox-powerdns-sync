@@ -149,7 +149,7 @@ def main():
     parser.add_argument('--dry_run', '-d', action='store_true',
                         help='Perform a dry run (make no changes to PowerDNS)')
     parser.add_argument('--loglevel', '-l', type=str, default='INFO',
-                        choices=['WARNING', 'INFO', ''],
+                        choices=['WARNING', 'INFO', 'DEBUG', ''],
                         help='Log level for the console logger')
     parser.add_argument('--loglevel_journal', '-j', type=str, default='',
                         choices=['WARNING', 'INFO', ''],
@@ -277,6 +277,8 @@ Not continuing execution. Please resolve the duplicate.''')
         logger.info('Skipping Create/Delete due to Dry Run')
         sys.exit()
 
+    affected_zones = set()
+
     for record in to_create:
         logger.info(f'Now creating {record}')
         zone = pdns.get_zone(record[3])
@@ -287,6 +289,7 @@ Not continuing execution. Please resolve the duplicate.''')
                 [(record[2], False)],
                 comments=[powerdns.Comment('NetBox')])
         ])
+        affected_zones.add(record[3])
 
     for record in to_delete:
         logger.info(f'Now deleting {record}')
@@ -298,6 +301,12 @@ Not continuing execution. Please resolve the duplicate.''')
                 [(record[2], False)],
                 comments=[powerdns.Comment('NetBox')])
         ])
+        affected_zones.add(record[3])
+
+    for zone in affected_zones:
+        logger.info(f'Now rectifying {zone}')
+        zone = pdns.get_zone(zone)
+        zone._put(zone.url + '/rectify')
 
 
 if __name__ == '__main__':
