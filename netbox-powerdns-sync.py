@@ -11,7 +11,7 @@ import powerdns
 import pynetbox
 from systemd.journal import JournalHandler
 
-from config import DRY_RUN, FORWARD_ZONES, REVERSE_ZONES, MULTI_FORWARD_ZONES
+from config import DRY_RUN, FORWARD_ZONES, REVERSE_ZONES, MULTI_FORWARD_ZONES, DEFAULT_TTL
 from config import NB_TOKEN, NB_URL, PDNS_API_URL, PDNS_KEY
 from config import PTR_ONLY_CF
 from config import SOURCE_DEVICE, SOURCE_IP, SOURCE_VM
@@ -57,7 +57,8 @@ def get_host_ips_ip(nb, zone, multi=False):
             make_canonical(nb_ip.dns_name),
             type,
             re.sub('/[0-9]*', '', str(nb_ip)),
-            make_canonical(zone)
+            make_canonical(zone),
+            nb_ip.custom_fields.get('dns_ttl') or DEFAULT_TTL
         ))
 
     return host_ips
@@ -83,7 +84,8 @@ def get_host_ips_ip_reverse(nb, prefix, zone):
                 make_canonical(reverse_pointer),
                 'PTR',
                 make_canonical(nb_ip.dns_name),
-                make_canonical(zone)
+                make_canonical(zone),
+                DEFAULT_TTL
             ))
 
     return host_ips
@@ -125,7 +127,8 @@ def get_host_ips_host(nb_hosts, zone):
                 make_canonical(nb_host.name),
                 'A',
                 re.sub('/[0-9]*', '', str(nb_host.primary_ip4)),
-                make_canonical(zone)
+                make_canonical(zone),
+                DEFAULT_TTL
             ))
 
         if nb_host.primary_ip6:
@@ -133,7 +136,8 @@ def get_host_ips_host(nb_hosts, zone):
                 make_canonical(nb_host.name),
                 'AAAA',
                 re.sub('/[0-9]*', '', str(nb_host.primary_ip6)),
-                make_canonical(zone)
+                make_canonical(zone),
+                DEFAULT_TTL
             ))
 
     return host_ips
@@ -219,7 +223,8 @@ def main():
                             record['name'],
                             record['type'],
                             ip['content'],
-                            make_canonical(forward_zone)
+                            make_canonical(forward_zone),
+                            record['ttl']
                         ))
 
     for reverse_zone in REVERSE_ZONES:
@@ -245,7 +250,8 @@ def main():
                             record['name'],
                             record['type'],
                             ip['content'],
-                            make_canonical(reverse_zone['zone'])
+                            make_canonical(reverse_zone['zone']),
+                            record['ttl']
                         ))
 
     # find duplicates in host_ips
@@ -267,13 +273,13 @@ Not continuing execution. Please resolve the duplicate.''')
     # tupels from PowerDNS without tupels that are documented in NetBox
     to_delete = set(record_ips) - set(host_ips)
 
-    logger.info(f'{len(to_create)} records to create')
-    for record in to_create:
-        logger.info(f'Will create record {record[0]}')
-
     logger.info(f'{len(to_delete)} records to delete')
     for record in to_delete:
         logger.info(f'Will delete record {record[0]}')
+
+    logger.info(f'{len(to_create)} records to create')
+    for record in to_create:
+        logger.info(f'Will create record {record[0]}')
 
     if dry_run:
         logger.info('Skipping Create/Delete due to Dry Run')
@@ -281,29 +287,32 @@ Not continuing execution. Please resolve the duplicate.''')
 
     affected_zones = set()
 
-    for record in to_create:
-        logger.info(f'Now creating {record}')
-        zone = pdns.get_zone(record[3])
-        zone.create_records([
-            powerdns.RRSet(
-                record[0],
-                record[1],
-                [(record[2], False)],
-                comments=[powerdns.Comment('NetBox')])
-        ])
-        affected_zones.add(record[3])
-
-    for record in to_delete:
-        logger.info(f'Now deleting {record}')
-        zone = pdns.get_zone(record[3])
+    for name, rtype, value, zone, ttl in to_delete:
+        logger.info(f'Now deleting {(name, rtype, value, zone, ttl)}')
+        affected_zones.add(zone)
+        zone = pdns.get_zone(zone)
         zone.delete_records([
             powerdns.RRSet(
-                record[0],
-                record[1],
-                [(record[2], False)],
-                comments=[powerdns.Comment('NetBox')])
+                name,
+                rtype,
+                [(value, False)],
+                comments=[powerdns.Comment('NetBox')]
+            )
         ])
-        affected_zones.add(record[3])
+
+    for name, rtype, value, zone, ttl in to_create:
+        logger.info(f'Now creating {(name, rtype, value, zone, ttl)}')
+        affected_zones.add(zone)
+        zone = pdns.get_zone(zone)
+        zone.create_records([
+            powerdns.RRSet(
+                name,
+                rtype,
+                [(value, False)],
+                ttl=ttl,
+                comments=[powerdns.Comment('NetBox')]
+            )
+        ])
 
     for zone in affected_zones:
         logger.info(f'Now rectifying {zone}')
