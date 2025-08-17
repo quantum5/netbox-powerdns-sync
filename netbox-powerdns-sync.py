@@ -5,7 +5,7 @@ import ipaddress
 import logging
 import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 
 import powerdns
 import pynetbox
@@ -13,7 +13,6 @@ from systemd.journal import JournalHandler
 
 from config import DRY_RUN, FORWARD_ZONES, REVERSE_ZONES, MULTI_FORWARD_ZONES, DEFAULT_TTL
 from config import NB_TOKEN, NB_URL, PDNS_API_URL, PDNS_KEY
-from config import PTR_ONLY_CF
 from config import SOURCE_DEVICE, SOURCE_IP, SOURCE_VM
 
 
@@ -27,35 +26,34 @@ def get_host_ips_ip(nb, zone, multi=False):
     host_ips = []
 
     # get IPs with DNS name ending in forward_zone from NetBox
-    if PTR_ONLY_CF:
-        nb_ips = nb.ipam.ip_addresses.filter(
-            dns_name__iew=zone,
-            status=['active', 'dhcp', 'slaac'],
-            cf_ptr_only=False
-        )
-    else:
-        nb_ips = nb.ipam.ip_addresses.filter(
-            dns_name__iew=zone,
-            status=['active', 'dhcp', 'slaac']
-        )
+    nb_ips = set(nb.ipam.ip_addresses.filter(
+        dns_name__iew=zone,
+        status=['active', 'dhcp', 'slaac'],
+    ))
 
-    # assemble list with tupels containing the canonical name, the record
-    # type and the IP address without the subnet from NetBox IPs
+    nb_ips.update(nb.ipam.ip_addresses.filter(
+        cf_dns_alias=zone,
+        status=['active', 'dhcp', 'slaac'],
+    ))
+
+    name_to_ip = defaultdict(list)
     for nb_ip in nb_ips:
-        if multi and nb_ip.dns_name != zone and not nb_ip.dns_name.endswith(f'.{zone}'):
+        name_to_ip[nb_ip.dns_name].append(nb_ip)
+        for alias in (nb_ip.custom_fields.get('dns_alias') or '').split():
+            name_to_ip[alias].append(nb_ip)
+
+    pairs = [(dns_name, value) for dns_name, values in name_to_ip.items() for value in values]
+
+    for dns_name, nb_ip in pairs:
+        if multi and dns_name != zone and not dns_name.endswith(f'.{zone}'):
             continue
 
-        if not multi and zone != '.'.join(nb_ip.dns_name.split('.')[1:]):
+        if not multi and zone != '.'.join(dns_name.split('.')[1:]):
             continue
-
-        if nb_ip.family.value == 6:
-            type = 'AAAA'
-        else:
-            type = 'A'
 
         host_ips.append((
-            make_canonical(nb_ip.dns_name),
-            type,
+            make_canonical(dns_name),
+            'AAAA' if nb_ip.family.value == 6 else 'A',
             re.sub('/[0-9]*', '', str(nb_ip)),
             make_canonical(zone),
             nb_ip.custom_fields.get('dns_ttl') or DEFAULT_TTL
