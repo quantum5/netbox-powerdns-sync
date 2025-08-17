@@ -11,7 +11,7 @@ import powerdns
 import pynetbox
 from systemd.journal import JournalHandler
 
-from config import DRY_RUN, FORWARD_ZONES, REVERSE_ZONES
+from config import DRY_RUN, FORWARD_ZONES, REVERSE_ZONES, MULTI_FORWARD_ZONES
 from config import NB_TOKEN, NB_URL, PDNS_API_URL, PDNS_KEY
 from config import PTR_ONLY_CF
 from config import SOURCE_DEVICE, SOURCE_IP, SOURCE_VM
@@ -22,7 +22,7 @@ def make_canonical(zone):
     return f'{zone}.'
 
 
-def get_host_ips_ip(nb, zone):
+def get_host_ips_ip(nb, zone, multi=False):
     # return list of tuples for ip addresses
     host_ips = []
 
@@ -42,8 +42,10 @@ def get_host_ips_ip(nb, zone):
     # assemble list with tupels containing the canonical name, the record
     # type and the IP address without the subnet from NetBox IPs
     for nb_ip in nb_ips:
-        nb_zone = nb_ip.dns_name.split('.')
-        if zone != '.'.join(nb_zone[1:]):
+        if multi and nb_ip.dns_name != zone and not nb_ip.dns_name.endswith(f'.{zone}'):
+            continue
+
+        if not multi and zone != '.'.join(nb_ip.dns_name.split('.')[1:]):
             continue
 
         if nb_ip.family.value == 6:
@@ -187,10 +189,10 @@ def main():
     host_ips = []
     record_ips = []
 
-    for forward_zone in FORWARD_ZONES:
+    for forward_zone in FORWARD_ZONES + MULTI_FORWARD_ZONES:
         # Source IP: Create domains based on DNS name attached to IPs
         if SOURCE_IP:
-            host_ips += get_host_ips_ip(nb, forward_zone)
+            host_ips += get_host_ips_ip(nb, forward_zone, multi=forward_zone in MULTI_FORWARD_ZONES)
         # Source device: Create domains based on the name of devices
         if SOURCE_DEVICE:
             host_ips += get_host_ips_device(nb, forward_zone)
