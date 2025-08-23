@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
+import hashlib
 import ipaddress
 import logging
 import re
@@ -11,9 +13,16 @@ import powerdns
 import pynetbox
 from systemd.journal import JournalHandler
 
-from config import DRY_RUN, FORWARD_ZONES, REVERSE_ZONES, MULTI_FORWARD_ZONES, DEFAULT_TTL
+from config import DEFAULT_TTL, DRY_RUN, FORWARD_ZONES, MULTI_FORWARD_ZONES, REVERSE_ZONES
 from config import NB_TOKEN, NB_URL, PDNS_API_URL, PDNS_KEY
-from config import SOURCE_DEVICE, SOURCE_IP, SOURCE_VM
+from config import SOURCE_DEVICE, SOURCE_IP, SOURCE_VM, SSHFP_VM
+
+
+def name_in_zone(dns_name, zone, multi):
+    if multi:
+        return dns_name == zone or dns_name.endswith(f'.{zone}')
+    else:
+        return zone == '.'.join(dns_name.split('.')[1:])
 
 
 def make_canonical(zone):
@@ -45,16 +54,13 @@ def get_host_ips_ip(nb, zone, multi=False):
     pairs = [(dns_name, value) for dns_name, values in name_to_ip.items() for value in values]
 
     for dns_name, nb_ip in pairs:
-        if multi and dns_name != zone and not dns_name.endswith(f'.{zone}'):
-            continue
-
-        if not multi and zone != '.'.join(dns_name.split('.')[1:]):
+        if not name_in_zone(dns_name, zone, multi):
             continue
 
         host_ips.append((
             make_canonical(dns_name),
             'AAAA' if nb_ip.family.value == 6 else 'A',
-            re.sub('/[0-9]*', '', str(nb_ip)),
+            frozenset([re.sub('/[0-9]*', '', str(nb_ip))]),
             make_canonical(zone),
             nb_ip.custom_fields.get('dns_ttl') or DEFAULT_TTL
         ))
@@ -81,7 +87,7 @@ def get_host_ips_ip_reverse(nb, prefix, zone):
             host_ips.append((
                 make_canonical(reverse_pointer),
                 'PTR',
-                make_canonical(nb_ip.dns_name),
+                frozenset([make_canonical(nb_ip.dns_name)]),
                 make_canonical(zone),
                 DEFAULT_TTL
             ))
@@ -105,10 +111,8 @@ def get_host_ips_vm(nb, zone):
     # get VMs with name ending in forward_zone from NetBox
     nb_vms = nb.virtualization.virtual_machines.filter(
         name__iew=zone,
-        status=['active',
-                'failed',
-                'offline',
-                'staged'])
+        status=['active', 'failed', 'offline', 'staged']
+    )
 
     return get_host_ips_host(nb_vms, zone)
 
@@ -124,7 +128,7 @@ def get_host_ips_host(nb_hosts, zone):
             host_ips.append((
                 make_canonical(nb_host.name),
                 'A',
-                re.sub('/[0-9]*', '', str(nb_host.primary_ip4)),
+                frozenset({re.sub('/[0-9]*', '', str(nb_host.primary_ip4))}),
                 make_canonical(zone),
                 DEFAULT_TTL
             ))
@@ -133,12 +137,51 @@ def get_host_ips_host(nb_hosts, zone):
             host_ips.append((
                 make_canonical(nb_host.name),
                 'AAAA',
-                re.sub('/[0-9]*', '', str(nb_host.primary_ip6)),
+                frozenset([re.sub('/[0-9]*', '', str(nb_host.primary_ip6))]),
                 make_canonical(zone),
                 DEFAULT_TTL
             ))
 
     return host_ips
+
+
+SSHFP_ALGOS = {
+    'ssh-rsa': 1,
+    'ssh-dsa': 2,
+    'ecdsa-sha2-nistp256': 3,
+    'ssh-ed25519': 4,
+    'ssh-ed448': 5,
+}
+
+
+def key_to_sshfp(line):
+    algo, pubkey, *_ = line.split()
+    digest = hashlib.sha256(base64.b64decode(pubkey.encode('ascii'))).hexdigest()
+    return f'{SSHFP_ALGOS[algo]} 2 {digest}'
+
+
+def get_sshfp_vms(nb, zone, multi=False):
+    nb_vms = nb.virtualization.virtual_machines.filter(
+        name__iew=zone,
+        status=['active', 'failed', 'offline', 'staged']
+    )
+
+    sshfps = []
+
+    for nb_vm in nb_vms:
+        sshfp = nb_vm.custom_fields.get('sshfp')
+        if not sshfp or not name_in_zone(nb_vm.name, zone, multi):
+            continue
+
+        sshfps.append((
+            make_canonical(nb_vm.name),
+            'SSHFP',
+            frozenset([key_to_sshfp(key) for key in sshfp.splitlines()]),
+            make_canonical(zone),
+            DEFAULT_TTL,
+        ))
+
+    return sshfps
 
 
 def main():
@@ -188,19 +231,24 @@ def main():
                                              api_key=PDNS_KEY)
     pdns = powerdns.PDNSEndpoint(pdns_api_client).servers[0]
 
-    host_ips = []
-    record_ips = []
+    nb_records = []
+    pd_records = []
 
     for forward_zone in FORWARD_ZONES + MULTI_FORWARD_ZONES:
+        multi = forward_zone in MULTI_FORWARD_ZONES
+
         # Source IP: Create domains based on DNS name attached to IPs
         if SOURCE_IP:
-            host_ips += get_host_ips_ip(nb, forward_zone, multi=forward_zone in MULTI_FORWARD_ZONES)
+            nb_records += get_host_ips_ip(nb, forward_zone, multi=multi)
         # Source device: Create domains based on the name of devices
         if SOURCE_DEVICE:
-            host_ips += get_host_ips_device(nb, forward_zone)
+            nb_records += get_host_ips_device(nb, forward_zone)
         # Source VM: Create domains based on the name of VMs
         if SOURCE_VM:
-            host_ips += get_host_ips_vm(nb, forward_zone)
+            nb_records += get_host_ips_vm(nb, forward_zone)
+
+        if SSHFP_VM:
+            nb_records += get_sshfp_vms(nb, forward_zone, multi=multi)
 
         # get zone forward_zone_canonical form PowerDNS
         zone = pdns.get_zone(make_canonical(forward_zone))
@@ -213,21 +261,20 @@ def main():
         # type, the IP address and forward_zone_canonical without the subnet
         # from PowerDNS zone records with the
         # comment 'NetBox'
-        for record in zone.records:
-            for comment in record['comments']:
+        for rrset in zone.records:
+            for comment in rrset['comments']:
                 if comment['content'] == 'NetBox':
-                    for ip in record['records']:
-                        record_ips.append((
-                            record['name'],
-                            record['type'],
-                            ip['content'],
-                            make_canonical(forward_zone),
-                            record['ttl']
-                        ))
+                    pd_records.append((
+                        rrset['name'],
+                        rrset['type'],
+                        frozenset([record['content'] for record in rrset['records']]),
+                        make_canonical(forward_zone),
+                        rrset['ttl']
+                    ))
 
     for reverse_zone in REVERSE_ZONES:
-        host_ips += get_host_ips_ip_reverse(nb, reverse_zone['prefix'],
-                                            reverse_zone['zone'])
+        nb_records += get_host_ips_ip_reverse(nb, reverse_zone['prefix'],
+                                              reverse_zone['zone'])
 
         # get reverse zone records form PowerDNS
         zone = pdns.get_zone(make_canonical(reverse_zone['zone']))
@@ -240,20 +287,19 @@ def main():
         # type, the IP address and forward_zone_canonical without the subnet
         # from PowerDNS zone records with the
         # comment 'NetBox'
-        for record in zone.records:
-            for comment in record['comments']:
+        for rrset in zone.records:
+            for comment in rrset['comments']:
                 if comment['content'] == 'NetBox':
-                    for ip in record['records']:
-                        record_ips.append((
-                            record['name'],
-                            record['type'],
-                            ip['content'],
-                            make_canonical(reverse_zone['zone']),
-                            record['ttl']
-                        ))
+                    pd_records.append((
+                        rrset['name'],
+                        rrset['type'],
+                        frozenset([record['content'] for record in rrset['records']]),
+                        make_canonical(reverse_zone['zone']),
+                        rrset['ttl']
+                    ))
 
-    # find duplicates in host_ips
-    duplicate_records = [(host_ip[0], host_ip[1]) for host_ip in host_ips]
+    # find duplicates in nb_records
+    duplicate_records = [(name, rtype) for name, rtype, *_ in nb_records]
     duplicate_records = [duplicate for duplicate, amount in
                          Counter(duplicate_records).items() if amount > 1]
     for duplicate_record in duplicate_records:
@@ -265,19 +311,19 @@ Not continuing execution. Please resolve the duplicate.''')
 
     # create set with tuples that have to be created
     # tuples from NetBox without tuples that already exists in PowerDNS
-    to_create = set(host_ips) - set(record_ips)
+    to_create = set(nb_records) - set(pd_records)
 
     # create set with tuples that have to be deleted
     # tuples from PowerDNS without tuples that are documented in NetBox
-    to_delete = set(record_ips) - set(host_ips)
+    to_delete = set(pd_records) - set(nb_records)
 
     logger.info(f'{len(to_delete)} records to delete')
     for record in to_delete:
-        logger.info(f'Will delete record {record[0]}')
+        logger.info(f'Will delete record {record}')
 
     logger.info(f'{len(to_create)} records to create')
     for record in to_create:
-        logger.info(f'Will create record {record[0]}')
+        logger.info(f'Will create record {record}')
 
     if dry_run:
         logger.info('Skipping Create/Delete due to Dry Run')
@@ -285,31 +331,20 @@ Not continuing execution. Please resolve the duplicate.''')
 
     affected_zones = set()
 
-    for name, rtype, value, zone, ttl in to_delete:
-        logger.info(f'Now deleting {(name, rtype, value, zone, ttl)}')
+    for name, rtype, records, zone, ttl in to_delete:
+        logger.info(f'Now deleting {(name, rtype, records, zone, ttl)}')
         affected_zones.add(zone)
         zone = pdns.get_zone(zone)
         zone.delete_records([
-            powerdns.RRSet(
-                name,
-                rtype,
-                [(value, False)],
-                comments=[powerdns.Comment('NetBox')]
-            )
+            powerdns.RRSet(name, rtype, records, comments=[powerdns.Comment('NetBox')])
         ])
 
-    for name, rtype, value, zone, ttl in to_create:
-        logger.info(f'Now creating {(name, rtype, value, zone, ttl)}')
+    for name, rtype, records, zone, ttl in to_create:
+        logger.info(f'Now creating {(name, rtype, records, zone, ttl)}')
         affected_zones.add(zone)
         zone = pdns.get_zone(zone)
         zone.create_records([
-            powerdns.RRSet(
-                name,
-                rtype,
-                [(value, False)],
-                ttl=ttl,
-                comments=[powerdns.Comment('NetBox')]
-            )
+            powerdns.RRSet(name, rtype, records, ttl=ttl, comments=[powerdns.Comment('NetBox')])
         ])
 
     for zone in affected_zones:
