@@ -63,7 +63,7 @@ def get_host_ips_ip(nb, zone, multi=False):
 
 
 def get_host_ips_ip_reverse(nb, prefix, zone):
-    # return list of reverse zone tupels for ip addresses
+    # return list of reverse zone tuples for ip addresses
     host_ips = []
 
     # get IPs within the prefix from NetBox
@@ -72,7 +72,7 @@ def get_host_ips_ip_reverse(nb, prefix, zone):
         status=['active', 'dhcp', 'slaac']
     )
 
-    # assemble list with tupels containing the canonical name, the record type
+    # assemble list with tuples containing the canonical name, the record type
     # and the IP address without the subnet from NetBox IPs
     for nb_ip in nb_ips:
         if nb_ip.dns_name != '':
@@ -90,7 +90,7 @@ def get_host_ips_ip_reverse(nb, prefix, zone):
 
 
 def get_host_ips_device(nb, zone):
-    # return list of tupels for devices
+    # return list of tuples for devices
     # get devices with name ending in forward_zone from NetBox
     nb_devices = nb.dcim.devices.filter(
         name__iew=zone,
@@ -101,7 +101,7 @@ def get_host_ips_device(nb, zone):
 
 
 def get_host_ips_vm(nb, zone):
-    # return list of tupels for VMs
+    # return list of tuples for VMs
     # get VMs with name ending in forward_zone from NetBox
     nb_vms = nb.virtualization.virtual_machines.filter(
         name__iew=zone,
@@ -114,10 +114,10 @@ def get_host_ips_vm(nb, zone):
 
 
 def get_host_ips_host(nb_hosts, zone):
-    # return list of tupels for hosts (NetBox devices/VMs)
+    # return list of tuples for hosts (NetBox devices/VMs)
     host_ips = []
 
-    # assemble list with tupels containing the canonical name, the record
+    # assemble list with tuples containing the canonical name, the record
     # type and the IP addresses without the subnet of the device/vm
     for nb_host in nb_hosts:
         if nb_host.primary_ip4:
@@ -209,7 +209,7 @@ def main():
             logger.critical(f'Zone {forward_zone} not found in PowerDNS. Skipping it.')
             continue
 
-        # assemble list with tupels containing the canonical name, the record
+        # assemble list with tuples containing the canonical name, the record
         # type, the IP address and forward_zone_canonical without the subnet
         # from PowerDNS zone records with the
         # comment 'NetBox'
@@ -236,7 +236,7 @@ def main():
             logger.critical(f'Zone {reverse_zone["zone"]} not found in PowerDNS. Skipping it.')
             continue
 
-        # assemble list with tupels containing the canonical name, the record
+        # assemble list with tuples containing the canonical name, the record
         # type, the IP address and forward_zone_canonical without the subnet
         # from PowerDNS zone records with the
         # comment 'NetBox'
@@ -263,12 +263,12 @@ Not continuing execution. Please resolve the duplicate.''')
     if len(duplicate_records) > 0:
         sys.exit()
 
-    # create set with tupels that have to be created
-    # tupels from NetBox without tupels that already exists in PowerDNS
+    # create set with tuples that have to be created
+    # tuples from NetBox without tuples that already exists in PowerDNS
     to_create = set(host_ips) - set(record_ips)
 
-    # create set with tupels that have to be deleted
-    # tupels from PowerDNS without tupels that are documented in NetBox
+    # create set with tuples that have to be deleted
+    # tuples from PowerDNS without tuples that are documented in NetBox
     to_delete = set(record_ips) - set(host_ips)
 
     logger.info(f'{len(to_delete)} records to delete')
