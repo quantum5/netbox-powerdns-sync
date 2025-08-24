@@ -150,7 +150,7 @@ SSHFP_ALGOS = {
     'ssh-dsa': 2,
     'ecdsa-sha2-nistp256': 3,
     'ssh-ed25519': 4,
-    'ssh-ed448': 5,
+    'ssh-ed448': 6,
 }
 
 
