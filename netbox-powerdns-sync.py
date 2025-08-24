@@ -15,7 +15,7 @@ from systemd.journal import JournalHandler
 
 from config import DEFAULT_TTL, DRY_RUN, FORWARD_ZONES, MULTI_FORWARD_ZONES, REVERSE_ZONES
 from config import NB_TOKEN, NB_URL, PDNS_API_URL, PDNS_KEY
-from config import SOURCE_DEVICE, SOURCE_IP, SOURCE_VM, SSHFP_VM
+from config import SOURCE_DEVICE, SOURCE_IP, SOURCE_VM, SSHFP_DEVICE, SSHFP_VM
 
 
 def name_in_zone(dns_name, zone, multi):
@@ -170,21 +170,16 @@ def key_to_sshfp(line):
     return f'{SSHFP_ALGOS[algo]} 2 {digest}'
 
 
-def get_sshfp_vms(nb, zone, multi=False):
-    nb_vms = nb.virtualization.virtual_machines.filter(
-        name__iew=zone,
-        status=['active', 'failed', 'offline', 'staged']
-    )
-
+def get_sshfp_hosts(nb_hosts, zone, multi=False):
     sshfps = []
 
-    for nb_vm in nb_vms:
-        sshfp = nb_vm.custom_fields.get('sshfp')
-        if not sshfp or not name_in_zone(nb_vm.name, zone, multi):
+    for nb_host in nb_hosts:
+        sshfp = nb_host.custom_fields.get('sshfp')
+        if not sshfp or not name_in_zone(nb_host.name, zone, multi):
             continue
 
         sshfps.append((
-            make_canonical(nb_vm.name),
+            make_canonical(nb_host.name),
             'SSHFP',
             frozenset([key_to_sshfp(key) for key in sshfp.splitlines()]),
             make_canonical(zone),
@@ -192,6 +187,24 @@ def get_sshfp_vms(nb, zone, multi=False):
         ))
 
     return sshfps
+
+
+def get_sshfp_devices(nb, zone, multi=False):
+    nb_devs = nb.dcim.devices.filter(
+        name__iew=zone,
+        status=['active', 'failed', 'offline', 'staged']
+    )
+
+    return get_sshfp_hosts(nb_devs, zone, multi=multi)
+
+
+def get_sshfp_vms(nb, zone, multi=False):
+    nb_vms = nb.virtualization.virtual_machines.filter(
+        name__iew=zone,
+        status=['active', 'failed', 'offline', 'staged']
+    )
+
+    return get_sshfp_hosts(nb_vms, zone, multi=multi)
 
 
 def main():
@@ -256,6 +269,9 @@ def main():
         # Source VM: Create domains based on the name of VMs
         if SOURCE_VM:
             nb_records += get_host_ips_vm(nb, forward_zone)
+
+        if SSHFP_DEVICE:
+            nb_records += get_sshfp_devices(nb, forward_zone, multi=multi)
 
         if SSHFP_VM:
             nb_records += get_sshfp_vms(nb, forward_zone, multi=multi)

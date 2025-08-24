@@ -15,4 +15,5 @@ SOURCE_IP = True
 SOURCE_DEVICE = True
 SOURCE_VM = True
 
+SSHFP_DEVICE = False
 SSHFP_VM = False
