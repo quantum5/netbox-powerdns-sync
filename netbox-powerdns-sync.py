@@ -30,6 +30,11 @@ def make_canonical(zone):
     return f'{zone}.'
 
 
+def netbox_ip_reverse(nb_ip):
+    ip = re.sub('/[0-9]*', '', str(nb_ip))
+    return make_canonical(ipaddress.ip_address(ip).reverse_pointer)
+
+
 def get_host_ips_ip(nb, zone, multi=False):
     # return list of tuples for ip addresses
     host_ips = []
@@ -81,16 +86,21 @@ def get_host_ips_ip_reverse(nb, prefix, zone):
     # assemble list with tuples containing the canonical name, the record type
     # and the IP address without the subnet from NetBox IPs
     for nb_ip in nb_ips:
-        if nb_ip.dns_name != '':
-            ip = re.sub('/[0-9]*', '', str(nb_ip))
-            reverse_pointer = ipaddress.ip_address(ip).reverse_pointer
-            host_ips.append((
-                make_canonical(reverse_pointer),
-                'PTR',
-                frozenset([make_canonical(nb_ip.dns_name)]),
-                make_canonical(zone),
-                DEFAULT_TTL
-            ))
+        dns_name = nb_ip.dns_name
+
+        if SOURCE_VM and not dns_name and nb_ip.assigned_object and nb_ip.assigned_object.virtual_machine:
+            dns_name = nb_ip.assigned_object.virtual_machine.display
+
+        if not dns_name:
+            continue
+
+        host_ips.append((
+            netbox_ip_reverse(nb_ip),
+            'PTR',
+            frozenset([make_canonical(dns_name)]),
+            make_canonical(zone),
+            DEFAULT_TTL
+        ))
 
     return host_ips
 
@@ -124,7 +134,7 @@ def get_host_ips_host(nb_hosts, zone):
     # assemble list with tuples containing the canonical name, the record
     # type and the IP addresses without the subnet of the device/vm
     for nb_host in nb_hosts:
-        if nb_host.primary_ip4:
+        if not nb_host.primary_ip4.dns_name:
             host_ips.append((
                 make_canonical(nb_host.name),
                 'A',
@@ -133,7 +143,7 @@ def get_host_ips_host(nb_hosts, zone):
                 DEFAULT_TTL
             ))
 
-        if nb_host.primary_ip6:
+        if not nb_host.primary_ip6.dns_name:
             host_ips.append((
                 make_canonical(nb_host.name),
                 'AAAA',
