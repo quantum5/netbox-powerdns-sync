@@ -134,7 +134,7 @@ def get_host_ips_host(nb_hosts, zone):
     # assemble list with tuples containing the canonical name, the record
     # type and the IP addresses without the subnet of the device/vm
     for nb_host in nb_hosts:
-        if not nb_host.primary_ip4.dns_name:
+        if nb_host.primary_ip4 and not nb_host.primary_ip4.dns_name:
             host_ips.append((
                 make_canonical(nb_host.name),
                 'A',
@@ -143,7 +143,7 @@ def get_host_ips_host(nb_hosts, zone):
                 DEFAULT_TTL
             ))
 
-        if not nb_host.primary_ip6.dns_name:
+        if nb_host.primary_ip6 and not nb_host.primary_ip6.dns_name:
             host_ips.append((
                 make_canonical(nb_host.name),
                 'AAAA',
