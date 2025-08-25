@@ -262,22 +262,27 @@ def main():
     for forward_zone in FORWARD_ZONES + MULTI_FORWARD_ZONES:
         multi = forward_zone in MULTI_FORWARD_ZONES
 
-        # Source IP: Create domains based on DNS name attached to IPs
         if SOURCE_IP:
+            logger.info('Creating A/AAAA records based on IPs: %s', forward_zone)
             nb_records += get_host_ips_ip(nb, forward_zone, multi=multi)
-        # Source device: Create domains based on the name of devices
+
         if SOURCE_DEVICE:
+            logger.info('Creating A/AAAA records based on devices: %s', forward_zone)
             nb_records += get_host_ips_device(nb, forward_zone)
-        # Source VM: Create domains based on the name of VMs
+
         if SOURCE_VM:
+            logger.info('Creating A/AAAA records based on VMs: %s', forward_zone)
             nb_records += get_host_ips_vm(nb, forward_zone)
 
         if SSHFP_DEVICE:
+            logger.info('Creating SSHFP records based on devices: %s', forward_zone)
             nb_records += get_sshfp_devices(nb, forward_zone, multi=multi)
 
         if SSHFP_VM:
+            logger.info('Creating SSHFP records based on VMs: %s', forward_zone)
             nb_records += get_sshfp_vms(nb, forward_zone, multi=multi)
 
+        logger.info('Loading forward zone PowerDNS records: %s', forward_zone)
         # get zone forward_zone_canonical form PowerDNS
         zone = pdns.get_zone(make_canonical(forward_zone))
 
@@ -301,9 +306,11 @@ def main():
                     ))
 
     for reverse_zone in REVERSE_ZONES:
+        logger.info('Creating reverse zone records: %s', reverse_zone['prefix'])
         nb_records += get_host_ips_ip_reverse(nb, reverse_zone['prefix'],
                                               reverse_zone['zone'])
 
+        logger.info('Loading reverse zone PowerDNS records: %s', reverse_zone['prefix'])
         # get reverse zone records form PowerDNS
         zone = pdns.get_zone(make_canonical(reverse_zone['zone']))
 
@@ -326,6 +333,7 @@ def main():
                         rrset['ttl']
                     ))
 
+    logger.info('Deduplicating DNS records...')
     # find duplicates in nb_records
     duplicate_records = [(name, rtype) for name, rtype, *_ in nb_records]
     duplicate_records = [duplicate for duplicate, amount in
