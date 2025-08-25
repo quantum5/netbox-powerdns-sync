@@ -88,7 +88,9 @@ def get_host_ips_ip_reverse(nb, prefix, zone):
     for nb_ip in nb_ips:
         dns_name = nb_ip.dns_name
 
-        if SOURCE_VM and not dns_name and nb_ip.assigned_object and nb_ip.assigned_object.virtual_machine:
+        if (SOURCE_VM and not dns_name
+                and nb_ip.assigned_object_type == 'virtualization.vminterface'
+                and nb_ip.assigned_object.virtual_machine):
             dns_name = nb_ip.assigned_object.virtual_machine.display
 
         if not dns_name:
