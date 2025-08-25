@@ -115,7 +115,7 @@ def get_host_ips_device(nb, zone):
         status=['active', 'failed', 'offline', 'staged']
     )
 
-    return get_host_ips_host(nb_devices, zone)
+    return get_host_ips_host(nb, nb_devices, zone)
 
 
 def get_host_ips_vm(nb, zone):
@@ -126,17 +126,24 @@ def get_host_ips_vm(nb, zone):
         status=['active', 'failed', 'offline', 'staged']
     )
 
-    return get_host_ips_host(nb_vms, zone)
+    return get_host_ips_host(nb, nb_vms, zone)
 
 
-def get_host_ips_host(nb_hosts, zone):
-    # return list of tuples for hosts (NetBox devices/VMs)
-    host_ips = []
+def get_host_ips_host(nb, nb_hosts, zone):
+    nb_hosts = list(nb_hosts)
 
-    # assemble list with tuples containing the canonical name, the record
-    # type and the IP addresses without the subnet of the device/vm
+    primary_ips = []
     for nb_host in nb_hosts:
-        if nb_host.primary_ip4 and not nb_host.primary_ip4.dns_name:
+        if nb_host.primary_ip4:
+            primary_ips.append(nb_host.primary_ip4.id)
+        if nb_host.primary_ip6:
+            primary_ips.append(nb_host.primary_ip6.id)
+
+    dns_name = {ip.id: ip.dns_name for ip in nb.ipam.ip_addresses.filter(id=primary_ips)}
+
+    host_ips = []
+    for nb_host in nb_hosts:
+        if nb_host.primary_ip4 and not dns_name[nb_host.primary_ip4.id]:
             host_ips.append((
                 make_canonical(nb_host.name),
                 'A',
@@ -145,7 +152,7 @@ def get_host_ips_host(nb_hosts, zone):
                 DEFAULT_TTL
             ))
 
-        if nb_host.primary_ip6 and not nb_host.primary_ip6.dns_name:
+        if nb_host.primary_ip6 and not dns_name[nb_host.primary_ip6.id]:
             host_ips.append((
                 make_canonical(nb_host.name),
                 'AAAA',
