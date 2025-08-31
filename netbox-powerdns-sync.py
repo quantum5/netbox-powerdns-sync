@@ -19,8 +19,10 @@ from config import SOURCE_DEVICE, SOURCE_IP, SOURCE_VM, SSHFP_DEVICE, SSHFP_VM
 
 
 def name_in_zone(dns_name, zone, multi):
-    if multi:
-        return dns_name == zone or dns_name.endswith(f'.{zone}')
+    if dns_name == zone:
+        return True
+    elif multi:
+        return dns_name.endswith(f'.{zone}')
     else:
         return zone == '.'.join(dns_name.split('.')[1:])
 
