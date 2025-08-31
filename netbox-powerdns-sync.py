@@ -184,34 +184,48 @@ def get_sshfp_hosts(nb_hosts, zone, multi=False):
 
     for nb_host in nb_hosts:
         sshfp = nb_host.custom_fields.get('sshfp')
-        if not sshfp or not name_in_zone(nb_host.name, zone, multi):
+        if not sshfp:
             continue
 
-        sshfps.append((
-            make_canonical(nb_host.name),
-            'SSHFP',
-            frozenset([key_to_sshfp(key) for key in sshfp.splitlines()]),
-            make_canonical(zone),
-            DEFAULT_TTL,
-        ))
+        for host in [nb_host.name] + (nb_host.custom_fields.get('sshfp_alias') or '').split():
+            if not name_in_zone(host, zone, multi):
+                continue
+
+            sshfps.append((
+                make_canonical(host),
+                'SSHFP',
+                frozenset([key_to_sshfp(key) for key in sshfp.splitlines()]),
+                make_canonical(zone),
+                DEFAULT_TTL,
+            ))
 
     return sshfps
 
 
 def get_sshfp_devices(nb, zone, multi=False):
-    nb_devs = nb.dcim.devices.filter(
+    nb_devs = set(nb.dcim.devices.filter(
         name__iew=zone,
         status=['active', 'failed', 'offline', 'staged']
-    )
+    ))
+
+    nb_devs.update(nb.dcim.devices.filter(
+        cf_sshfp_alias=zone,
+        status=['active', 'failed', 'offline', 'staged']
+    ))
 
     return get_sshfp_hosts(nb_devs, zone, multi=multi)
 
 
 def get_sshfp_vms(nb, zone, multi=False):
-    nb_vms = nb.virtualization.virtual_machines.filter(
+    nb_vms = set(nb.virtualization.virtual_machines.filter(
         name__iew=zone,
         status=['active', 'failed', 'offline', 'staged']
-    )
+    ))
+
+    nb_vms.update(nb.virtualization.virtual_machines.filter(
+        cf_sshfp_alias=zone,
+        status=['active', 'failed', 'offline', 'staged']
+    ))
 
     return get_sshfp_hosts(nb_vms, zone, multi=multi)
 
