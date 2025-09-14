@@ -8,23 +8,33 @@ import logging
 import re
 import sys
 from collections import Counter, defaultdict
+from typing import Optional
 
 import powerdns
 import pynetbox
+from pynetbox.core.api import Api
+from pynetbox.core.response import Record
 from systemd.journal import JournalHandler
 
 from config import DEFAULT_TTL, DRY_RUN, FORWARD_ZONES, MULTI_FORWARD_ZONES, REVERSE_ZONES
 from config import NB_TOKEN, NB_URL, PDNS_API_URL, PDNS_KEY
 from config import SOURCE_DEVICE, SOURCE_IP, SOURCE_VM, SSHFP_DEVICE, SSHFP_VM
 
+DNSRecord = tuple[str, str, frozenset[str], str, int]
 
-def name_in_zone(dns_name, zone, multi):
-    if dns_name == zone:
-        return True
-    elif multi:
-        return dns_name.endswith(f'.{zone}')
-    else:
-        return zone == '.'.join(dns_name.split('.')[1:])
+
+def name_in_zone(dns_name: str, zones: list[str], multi: dict[str, bool]) -> Optional[str]:
+    if dns_name in zones:
+        return dns_name
+
+    for zone in zones:
+        if multi.get(zone):
+            if dns_name.endswith(f'.{zone}'):
+                return zone
+        elif zone == '.'.join(dns_name.split('.')[1:]):
+            return zone
+
+    return None
 
 
 def make_canonical(zone):
@@ -37,18 +47,18 @@ def netbox_ip_reverse(nb_ip):
     return make_canonical(ipaddress.ip_address(ip).reverse_pointer)
 
 
-def get_host_ips_ip(nb, zone, multi=False):
+def get_host_ips_ip(nb: Api, zones: list[str], multi: dict[str, bool]) -> list[DNSRecord]:
     # return list of tuples for ip addresses
-    host_ips = []
+    host_ips: list[DNSRecord] = []
 
     # get IPs with DNS name ending in forward_zone from NetBox
     nb_ips = set(nb.ipam.ip_addresses.filter(
-        dns_name__iew=zone,
+        dns_name__iew=zones,
         status=['active', 'dhcp', 'slaac'],
     ))
 
     nb_ips.update(nb.ipam.ip_addresses.filter(
-        cf_dns_alias=zone,
+        cf_dns_alias=zones,
         status=['active', 'dhcp', 'slaac'],
     ))
 
@@ -61,7 +71,8 @@ def get_host_ips_ip(nb, zone, multi=False):
     pairs = [(dns_name, value) for dns_name, values in name_to_ip.items() for value in values]
 
     for dns_name, nb_ip in pairs:
-        if not name_in_zone(dns_name, zone, multi):
+        zone = name_in_zone(dns_name, zones, multi)
+        if not zone:
             continue
 
         host_ips.append((
@@ -75,9 +86,9 @@ def get_host_ips_ip(nb, zone, multi=False):
     return host_ips
 
 
-def get_host_ips_ip_reverse(nb, prefix, zone):
+def get_host_ips_ip_reverse(nb: Api, prefix: str, zone: str) -> list[DNSRecord]:
     # return list of reverse zone tuples for ip addresses
-    host_ips = []
+    host_ips: list[DNSRecord] = []
 
     # get IPs within the prefix from NetBox
     nb_ips = nb.ipam.ip_addresses.filter(
@@ -109,31 +120,29 @@ def get_host_ips_ip_reverse(nb, prefix, zone):
     return host_ips
 
 
-def get_host_ips_device(nb, zone):
+def get_host_ips_device(nb: Api, zones: list[str], multi: dict[str, bool]) -> list[DNSRecord]:
     # return list of tuples for devices
     # get devices with name ending in forward_zone from NetBox
     nb_devices = nb.dcim.devices.filter(
-        name__iew=zone,
+        name__iew=zones,
         status=['active', 'failed', 'offline', 'staged']
     )
 
-    return get_host_ips_host(nb, nb_devices, zone)
+    return get_host_ips_host(nb, list(nb_devices), zones, multi)
 
 
-def get_host_ips_vm(nb, zone):
+def get_host_ips_vm(nb: Api, zones: list[str], multi: dict[str, bool]) -> list[DNSRecord]:
     # return list of tuples for VMs
     # get VMs with name ending in forward_zone from NetBox
     nb_vms = nb.virtualization.virtual_machines.filter(
-        name__iew=zone,
+        name__iew=zones,
         status=['active', 'failed', 'offline', 'staged']
     )
 
-    return get_host_ips_host(nb, nb_vms, zone)
+    return get_host_ips_host(nb, list(nb_vms), zones, multi)
 
 
-def get_host_ips_host(nb, nb_hosts, zone):
-    nb_hosts = list(nb_hosts)
-
+def get_host_ips_host(nb: Api, nb_hosts: list[Record], zones: list[str], multi: dict[str, bool]) -> list[DNSRecord]:
     primary_ips = []
     for nb_host in nb_hosts:
         if nb_host.primary_ip4:
@@ -143,8 +152,12 @@ def get_host_ips_host(nb, nb_hosts, zone):
 
     dns_name = {ip.id: ip.dns_name for ip in nb.ipam.ip_addresses.filter(id=primary_ips)}
 
-    host_ips = []
+    host_ips: list[DNSRecord] = []
     for nb_host in nb_hosts:
+        zone = name_in_zone(nb_host.name, zones, multi)
+        if not zone:
+            continue
+
         if nb_host.primary_ip4 and not dns_name[nb_host.primary_ip4.id]:
             host_ips.append((
                 make_canonical(nb_host.name),
@@ -181,8 +194,8 @@ def key_to_sshfp(line):
     return f'{SSHFP_ALGOS[algo]} 2 {digest}'
 
 
-def get_sshfp_hosts(nb_hosts, zone, multi=False):
-    sshfps = []
+def get_sshfp_hosts(nb_hosts: set[Record], zones: list[str], multi: dict[str, bool]) -> list[DNSRecord]:
+    sshfps: list[DNSRecord] = []
 
     for nb_host in nb_hosts:
         sshfp = nb_host.custom_fields.get('sshfp')
@@ -190,7 +203,8 @@ def get_sshfp_hosts(nb_hosts, zone, multi=False):
             continue
 
         for host in [nb_host.name] + (nb_host.custom_fields.get('sshfp_alias') or '').split():
-            if not name_in_zone(host, zone, multi):
+            zone = name_in_zone(host, zones, multi)
+            if not zone:
                 continue
 
             sshfps.append((
@@ -204,32 +218,32 @@ def get_sshfp_hosts(nb_hosts, zone, multi=False):
     return sshfps
 
 
-def get_sshfp_devices(nb, zone, multi=False):
+def get_sshfp_devices(nb: Api, zones: list[str], multi: dict[str, bool]) -> list[DNSRecord]:
     nb_devs = set(nb.dcim.devices.filter(
-        name__iew=zone,
+        name__iew=zones,
         status=['active', 'failed', 'offline', 'staged']
     ))
 
     nb_devs.update(nb.dcim.devices.filter(
-        cf_sshfp_alias=zone,
+        cf_sshfp_alias=zones,
         status=['active', 'failed', 'offline', 'staged']
     ))
 
-    return get_sshfp_hosts(nb_devs, zone, multi=multi)
+    return get_sshfp_hosts(nb_devs, zones, multi)
 
 
-def get_sshfp_vms(nb, zone, multi=False):
+def get_sshfp_vms(nb: Api, zones: list[str], multi: dict[str, bool]) -> list[DNSRecord]:
     nb_vms = set(nb.virtualization.virtual_machines.filter(
-        name__iew=zone,
+        name__iew=zones,
         status=['active', 'failed', 'offline', 'staged']
     ))
 
     nb_vms.update(nb.virtualization.virtual_machines.filter(
-        cf_sshfp_alias=zone,
+        cf_sshfp_alias=zones,
         status=['active', 'failed', 'offline', 'staged']
     ))
 
-    return get_sshfp_hosts(nb_vms, zone, multi=multi)
+    return get_sshfp_hosts(nb_vms, zones, multi)
 
 
 def main():
@@ -282,29 +296,30 @@ def main():
     nb_records = []
     pd_records = []
 
+    forward_zones = FORWARD_ZONES + MULTI_FORWARD_ZONES
+    forward_multi = {zone: True for zone in MULTI_FORWARD_ZONES}
+
+    if SOURCE_IP:
+        logger.info('Creating A/AAAA records based on IPs')
+        nb_records += get_host_ips_ip(nb, forward_zones, forward_multi)
+
+    if SOURCE_DEVICE:
+        logger.info('Creating A/AAAA records based on devices')
+        nb_records += get_host_ips_device(nb, forward_zones, forward_multi)
+
+    if SOURCE_VM:
+        logger.info('Creating A/AAAA records based on VMs')
+        nb_records += get_host_ips_vm(nb, forward_zones, forward_multi)
+
+    if SSHFP_DEVICE:
+        logger.info('Creating SSHFP records based on devices')
+        nb_records += get_sshfp_devices(nb, forward_zones, forward_multi)
+
+    if SSHFP_VM:
+        logger.info('Creating SSHFP records based on VMs')
+        nb_records += get_sshfp_vms(nb, forward_zones, forward_multi)
+
     for forward_zone in FORWARD_ZONES + MULTI_FORWARD_ZONES:
-        multi = forward_zone in MULTI_FORWARD_ZONES
-
-        if SOURCE_IP:
-            logger.info('Creating A/AAAA records based on IPs: %s', forward_zone)
-            nb_records += get_host_ips_ip(nb, forward_zone, multi=multi)
-
-        if SOURCE_DEVICE:
-            logger.info('Creating A/AAAA records based on devices: %s', forward_zone)
-            nb_records += get_host_ips_device(nb, forward_zone)
-
-        if SOURCE_VM:
-            logger.info('Creating A/AAAA records based on VMs: %s', forward_zone)
-            nb_records += get_host_ips_vm(nb, forward_zone)
-
-        if SSHFP_DEVICE:
-            logger.info('Creating SSHFP records based on devices: %s', forward_zone)
-            nb_records += get_sshfp_devices(nb, forward_zone, multi=multi)
-
-        if SSHFP_VM:
-            logger.info('Creating SSHFP records based on VMs: %s', forward_zone)
-            nb_records += get_sshfp_vms(nb, forward_zone, multi=multi)
-
         logger.info('Loading forward zone PowerDNS records: %s', forward_zone)
         # get zone forward_zone_canonical form PowerDNS
         zone = pdns.get_zone(make_canonical(forward_zone))
